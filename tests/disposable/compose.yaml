@@ -1,0 +1,38 @@
+# Disposable AdventureLog for integration tests. Nothing persists (tmpfs DB, no media volume).
+#   docker compose -p almcp-test -f tests/disposable/compose.yaml up -d
+#   tests/disposable/mint-key.sh   -> prints an API key for the test admin
+name: almcp-test
+services:
+  db:
+    image: postgis/postgis:16-3.5
+    environment:
+      POSTGRES_DB: database
+      POSTGRES_USER: adventure
+      POSTGRES_PASSWORD: disposable-test-only
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U adventure -d database"]
+      interval: 3s
+      retries: 40
+  server:
+    image: ghcr.io/seanmorley15/adventurelog-backend:${ADVENTURELOG_TAG:-v0.13.0}
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      POSTGRES_DB: database
+      POSTGRES_USER: adventure
+      POSTGRES_PASSWORD: disposable-test-only
+      SECRET_KEY: disposable-test-only-not-secret
+      SITE_URL: http://127.0.0.1:18015
+      PUBLIC_URL: http://127.0.0.1:18016
+      FRONTEND_URL: http://127.0.0.1:18015
+      CSRF_TRUSTED_ORIGINS: http://127.0.0.1:18016,http://127.0.0.1:18015
+      DJANGO_ADMIN_USERNAME: admin
+      DJANGO_ADMIN_PASSWORD: disposable-test-only
+      DJANGO_ADMIN_EMAIL: admin@example.invalid
+      DEBUG: "False"
+    ports:
+      - "127.0.0.1:${ADVENTURELOG_TEST_PORT:-18016}:80"

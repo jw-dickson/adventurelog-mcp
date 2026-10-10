@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"   # weekly: catch AdventureLog API drift
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        adventurelog: ["v0.13.0", "latest"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: uv run ruff check src tests
+      - run: uv run pytest tests/unit -q
+      - name: Start disposable AdventureLog (${{ matrix.adventurelog }})
+        env:
+          ADVENTURELOG_TAG: ${{ matrix.adventurelog }}
+        run: |
+          docker compose -p almcp-test -f tests/disposable/compose.yaml up -d
+          for i in $(seq 1 60); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18016/api/collections/)" = "400" ] && break
+            sleep 5
+          done
+          echo "ADVENTURELOG_API_KEY=$(tests/disposable/mint-key.sh)" >> "$GITHUB_ENV"
+      - name: Integration tests
+        env:
+          ADVENTURELOG_URL: http://127.0.0.1:18016
+          ADVENTURELOG_IT_DISPOSABLE: "1"
+        run: uv run pytest tests/integration -q
+      - if: failure()
+        run: docker compose -p almcp-test -f tests/disposable/compose.yaml logs server | tail -100
+
+  image:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          push: true
+          tags: ghcr.io/${{ github.repository }}:latest,ghcr.io/${{ github.repository }}:${{ github.sha }}
