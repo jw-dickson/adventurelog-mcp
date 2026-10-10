@@ -182,6 +182,20 @@ def build_server(settings: Settings | None = None, *, transport: Any = None) -> 
         """Full-text search across the user's own AdventureLog items (locations, lodging, notes, trips…)."""
         return await run(service(ctx).search(query))
 
+    @mcp.prompt(name="plan-trip", title="Plan or revise a trip in AdventureLog")
+    def plan_trip(request: str, trip_name: str | None = None) -> str:
+        """Start a planning session: read the trip, propose changes, dry-run, confirm, apply."""
+        target = f'the trip "{trip_name}"' if trip_name else "the right trip (or a new one)"
+        return (
+            f"Help me plan {target} in AdventureLog. What I want: {request}\n\n"
+            "1. Find the trip with list_trips and read it with get_trip (use from_date/to_date for long trips).\n"
+            "2. Propose the changes in plain language and wait for my OK.\n"
+            "3. For a few edits use the upsert_*/move_item tools. For many, use export_trip_plan, edit the plan, "
+            "run apply_trip_plan with dry_run=true, show me the diff, then apply with expected_diff_hash.\n"
+            "4. Use search_places for coordinates; never guess them. Use local times in the trip's timezone.\n"
+            "5. Never delete anything I didn't ask to delete. Finish by re-reading the trip and summarising what changed."
+        )
+
     if settings.read_only:
         return mcp
 

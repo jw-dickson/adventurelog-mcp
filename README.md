@@ -23,10 +23,27 @@ all directly in your AdventureLog.
 | Items | `upsert_location`, `upsert_lodging`, `upsert_transportation`, `upsert_note`, `upsert_checklist`, `delete_item` |
 | Itinerary | `schedule_item`, `move_item`, `reorder_day`, `unschedule_item` |
 | Sharing | `share_trip` (sends an invite), `unshare_trip` |
+| Bulk | `export_trip_plan` (trip → editable plan), `apply_trip_plan` (plan → trip: dry-run diff by default, `expected_diff_hash` guard, idempotent) |
+| Prompt | `plan-trip`: read, propose, dry-run, confirm, apply |
 
 Each `upsert_*` tool creates the item when you omit its id and edits it when you pass one. Pass `trip_id` and a
 `date` (or `trip_wide`) to put the item on the itinerary in the same call. Lodging and transportation are
 scheduled on their local start date automatically.
+
+### Bulk plans
+
+`apply_trip_plan` takes a whole trip as data (trip fields, day titles, and each day's items in order) and diffs it
+against AdventureLog. Items match by `id`, or else by type + name. Only the fields you state are compared and
+written. A dry run (the default) returns the diff and a `diff_hash`. Applying with that hash refuses to run if the
+trip changed in between, and re-applying the same plan is a no-op. `export_trip_plan` produces the same format
+from an existing trip, so an assistant can export, edit and re-apply.
+
+```json
+{"name": "Lisbon long weekend", "start_date": "2027-03-01", "end_date": "2027-03-03", "timezone": "Europe/Lisbon",
+ "days": [{"date": "2027-03-01", "name": "Arrive", "items": [
+   {"type": "lodging", "name": "Alfama Guesthouse", "check_in": "2027-03-01T15:00", "check_out": "2027-03-03T11:00"},
+   {"type": "location", "name": "Miradouro de Santa Luzia", "category": "Sightseeing", "start": "17:30", "end": "18:30"}]}]}
+```
 
 ## Setup
 
