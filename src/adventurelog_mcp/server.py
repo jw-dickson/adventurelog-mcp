@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from . import __version__
 from .client import AdventureLogClient, ApiError
+from .plan import TripPlan, apply_plan, export_plan
 from .service import PlanError, TripService
 
 T = TypeVar("T")
@@ -145,10 +146,25 @@ def build_server(settings: Settings | None = None, *, transport: Any = None) -> 
         return await run(service(ctx).list_trips(include_shared, include_archived))
 
     @mcp.tool(annotations=READ)
-    async def get_trip(ctx: Context, trip_id: TripId) -> dict:
+    async def get_trip(ctx: Context, trip_id: TripId,
+                       from_date: Annotated[str | None, Field(description="Only days on/after YYYY-MM-DD")] = None,
+                       to_date: Annotated[str | None, Field(description="Only days on/before YYYY-MM-DD")] = None
+                       ) -> dict:
         """Get a whole trip in one call: days (name, description, ordered entries), trip-wide entries,
-        unscheduled items, collaborators and the trip's timezone. Long text is clipped; use get_item for full text."""
-        return await run(_render(service(ctx), trip_id))
+        unscheduled items, collaborators and the trip's timezone. Long text is clipped; use get_item for full text.
+        For long trips, pass from_date/to_date to fetch just the days you are working on."""
+        return await run(_render(service(ctx), trip_id, from_date, to_date))
+
+    @mcp.tool(annotations=READ)
+    async def export_trip_plan(ctx: Context, trip_id: TripId) -> dict:
+        """Export a trip as an editable plan (the same format apply_trip_plan takes, with item ids and full text).
+        Edit it and pass it back to apply_trip_plan to make many changes at once."""
+        svc = service(ctx)
+
+        async def go() -> dict:
+            return export_plan(await svc.load_trip(trip_id))
+
+        return await run(go())
 
     @mcp.tool(annotations=READ)
     async def get_item(ctx: Context, item_type: ItemType, item_id: str) -> dict:
@@ -369,6 +385,37 @@ def build_server(settings: Settings | None = None, *, transport: Any = None) -> 
         """Take an entry off the itinerary. The item itself stays in the trip (shown as unscheduled)."""
         return await run(service(ctx).unschedule(itinerary_id, keep_visit))
 
+    # ------------------------------------------------------------------ bulk
+
+    @mcp.tool(annotations=DESTRUCTIVE)
+    async def apply_trip_plan(
+        ctx: Context,
+        plan: TripPlan,
+        trip_id: Annotated[str | None, Field(description="Existing trip to update; omit to create a new trip.")] = None,
+        dry_run: Annotated[bool, Field(description="Default true: only show what would change.")] = True,
+        expected_diff_hash: Annotated[str | None, Field(
+            description="diff_hash from the dry run; the apply aborts if the trip changed since.")] = None,
+        allow_deletes: Annotated[bool, Field(
+            description="Remove items that are in the trip but not in the plan (locations are only taken off this "
+                        "trip, never deleted from other trips). Default false keeps them.")] = False,
+    ) -> dict:
+        """Create or update a whole trip from a declarative plan: trip fields, day titles, and each day's items in order.
+
+        Items match existing ones by `id`, or else by type + name, so re-applying the same plan changes nothing.
+        Only the fields the plan states are written. ALWAYS run with dry_run=true first, show the user the diff,
+        then apply with dry_run=false and expected_diff_hash. For small edits use the single-item tools instead."""
+        svc = service(ctx)
+
+        async def progress(done: int, total: int, msg: str) -> None:
+            try:
+                await ctx.report_progress(done, total, msg)
+            except Exception:  # progress is best-effort
+                logging.getLogger(__name__).debug("progress notification failed", exc_info=True)
+
+        return await run(apply_plan(svc, plan, trip_id and trip_id.strip(), dry_run=dry_run,
+                                    allow_deletes=allow_deletes, expected_diff_hash=expected_diff_hash,
+                                    progress=progress))
+
     # ------------------------------------------------------------------ sharing
 
     @mcp.tool(annotations=WRITE)
@@ -384,8 +431,12 @@ def build_server(settings: Settings | None = None, *, transport: Any = None) -> 
     return mcp
 
 
-async def _render(svc: TripService, trip_id: str) -> dict:
-    return (await svc.load_trip(trip_id)).render()
+async def _render(svc: TripService, trip_id: str, from_date: str | None = None, to_date: str | None = None) -> dict:
+    out = (await svc.load_trip(trip_id)).render()
+    if from_date or to_date:
+        lo, hi = from_date or "0000-00-00", to_date or "9999-99-99"
+        out["days"] = [d for d in out.get("days", []) if lo <= d["date"] <= hi]
+    return out
 
 
 def main(argv: list[str] | None = None) -> None:

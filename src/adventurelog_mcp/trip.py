@@ -77,6 +77,11 @@ class Trip:
                 counts[obj["end_timezone"]] += 1
         return counts.most_common(1)[0][0] if counts else "UTC"
 
+    def replace_itinerary(self, updated: list[dict[str, Any]]) -> None:
+        """Merge itinerary rows returned by the API (e.g. from reorder) into the in-memory copy."""
+        by_id = {str(u["id"]): u for u in updated}
+        self.itinerary = [by_id.pop(str(it["id"]), it) for it in self.itinerary] + list(by_id.values())
+
     def item_type_of(self, itin: dict[str, Any]) -> str:
         return (itin.get("item") or {}).get("type") or itin.get("object_name") or "unknown"
 

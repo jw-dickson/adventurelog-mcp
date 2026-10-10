@@ -113,7 +113,7 @@ claude mcp add --transport http adventurelog https://adventurelog-mcp.example.co
 ```sh
 uv sync
 uv run pytest tests/unit                       # offline
-ADVENTURELOG_URL=… ADVENTURELOG_API_KEY=… uv run pytest tests/integration   # creates and deletes a scratch trip
+ADVENTURELOG_IT_DISPOSABLE=1 ADVENTURELOG_URL=… ADVENTURELOG_API_KEY=… uv run pytest tests/integration   # DISPOSABLE instance only
 ```
 
 ## Credits

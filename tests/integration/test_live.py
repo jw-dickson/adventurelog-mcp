@@ -56,6 +56,7 @@ async def test_full_planning_flow():
         trip = await call("create_trip", name=name, start_date="2027-01-04", end_date="2027-01-08",
                           description="adventurelog-mcp integration test; safe to delete")
         tid = trip["id"]
+        gardens = market = None
         try:
             day = await call("upsert_day", trip_id=tid, date="2027-01-04", name="Arrive")
             again = await call("upsert_day", trip_id=tid, date="2027-01-04", description="Land and nap")
@@ -145,10 +146,7 @@ async def test_full_planning_flow():
 
             assert "does not match" in await call.error("delete_trip", trip_id=tid, confirm_name="nope")
         finally:
-            # also remove locations (they are not owned by the collection)
-            t = await call("get_trip", trip_id=tid)
-            loc_ids = {e["id"] for d in t.get("days", []) for e in d.get("items", []) if e["type"] == "location"}
-            loc_ids |= {u["id"] for u in t.get("unscheduled", []) if u["type"] == "location"}
-            for lid in loc_ids:
+            # remove only the locations this test created (they are not owned by the collection)
+            for lid in [x["id"] for x in (gardens, market) if x]:
                 await call("delete_item", item_type="location", item_id=lid)
             await call("delete_trip", trip_id=tid, confirm_name=name)

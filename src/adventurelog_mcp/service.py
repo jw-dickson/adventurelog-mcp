@@ -37,6 +37,21 @@ def _shift_utc(value: str | None, days: int) -> str | None:
 class TripService:
     def __init__(self, client: AdventureLogClient):
         self.api = client
+        self._categories: list[dict[str, Any]] | None = None
+
+    async def category_payload(self, category: str, icon: str | None) -> dict[str, Any]:
+        """Match an existing category by slug or display name (case-insensitive); otherwise describe a new one.
+        AdventureLog itself only matches on the slug, so 'Tours & Activities' would duplicate 'tour'."""
+        if self._categories is None:
+            self._categories = await self.api.get_all("/api/categories/")
+        wanted = category.strip().casefold()
+        for c in self._categories:
+            if wanted in ((c.get("name") or "").casefold(), (c.get("display_name") or "").casefold()):
+                return {"name": c["name"], "display_name": c.get("display_name") or c["name"],
+                        "icon": c.get("icon") or icon or "📍"}
+        new = {"name": wanted, "display_name": category.strip(), "icon": icon or "📍"}
+        self._categories.append(new)
+        return new
 
     # ------------------------------------------------------------------ reads
 
@@ -126,32 +141,43 @@ class TripService:
     # ------------------------------------------------------------------ scheduling
 
     async def schedule(self, trip: Trip, item_type: str, object_id: str,
-                       date: str | None, trip_wide: bool) -> dict[str, Any]:
-        """Make sure the object appears on `date` (or trip-wide). Moves a single existing
-        entry rather than duplicating it; adds a new entry if it is already on several days."""
+                       date: str | None, trip_wide: bool, keep: set[str] | None = None) -> dict[str, Any]:
+        """Make sure the object appears on `date` (or trip-wide).
+
+        Default: moves a single existing entry rather than duplicating it, and adds a new entry if
+        the object is already on several days. With `keep` (dates / "trip_wide" the object must stay on),
+        an existing entry outside `keep` is moved, and otherwise a new entry is added."""
         if trip_wide and date:
             raise PlanError("Give either date or trip_wide, not both.")
         object_id = _id(object_id, "item_id")
         existing = trip.itinerary_for(object_id)
+
+        def movable() -> dict[str, Any] | None:
+            if keep is None:
+                return existing[0] if len(existing) == 1 else None
+            return next((it for it in existing if _where(it) not in keep), None)
+
         if trip_wide:
             hit = next((it for it in existing if it.get("is_global")), None)
             if hit:
                 return _entry(hit)
-            if len(existing) == 1:
-                return await self._regroup(trip, existing[0], None)
+            if (mv := movable()) is not None:
+                return await self._regroup(trip, mv, None)
             created = await self.api.post("/api/itineraries/", {
                 "collection": trip.id, "content_type": item_type, "object_id": object_id, "is_global": True,
                 "order": _next_order(trip.group(None))})
+            trip.itinerary.append(created)
             return _entry(created)
         date = _in_trip(trip, date)  # type: ignore[arg-type]
         hit = next((it for it in existing if not it.get("is_global") and it.get("date") == date), None)
         if hit:
             return _entry(hit)
-        if len(existing) == 1:
-            return await self._regroup(trip, existing[0], date)
+        if (mv := movable()) is not None:
+            return await self._regroup(trip, mv, date)
         created = await self.api.post("/api/itineraries/", {
             "collection": trip.id, "content_type": item_type, "object_id": object_id, "date": date,
             "order": _next_order(trip.group(date))})
+        trip.itinerary.append(created)
         return _entry(created)
 
     async def _regroup(self, trip: Trip, itin: dict[str, Any], date: str | None,
@@ -169,6 +195,7 @@ class TripService:
                 row.update(is_global=False, date=date)
             payload.append(row)
         updated = await self.api.post("/api/itineraries/reorder/", {"items": payload})
+        trip.replace_itinerary(updated)
         moved = next(u for u in updated if str(u["id"]) == str(itin["id"]))
         return _entry(moved)
 
@@ -245,15 +272,19 @@ class TripService:
             return await self.api.patch(f"{ENDPOINTS[item_type]}{_id(item_id)}/", payload), False
         return await self.api.post(ENDPOINTS[item_type], payload), True
 
-    async def _finish(self, trip_id: str | None, item_type: str, obj: dict[str, Any], created: bool,
-                      date: str | None, trip_wide: bool, trip: Trip | None = None) -> dict[str, Any]:
+    async def _finish(self, trip: Trip | None, item_type: str, obj: dict[str, Any], created: bool,
+                      date: str | None, trip_wide: bool, auto_schedule: bool = True) -> dict[str, Any]:
         result: dict[str, Any] = {"type": item_type, "id": str(obj["id"]), "name": obj.get("name"), "created": created}
-        if trip_id and (date or trip_wide):
-            trip = trip or await self.load_trip(trip_id)
-            result["scheduled"] = await self.schedule(trip, item_type, str(obj["id"]), date, trip_wide)
+        if trip is not None:
+            trip.objects[(item_type, str(obj["id"]))] = obj
+            if auto_schedule and (date or trip_wide):
+                result["scheduled"] = await self.schedule(trip, item_type, str(obj["id"]), date, trip_wide)
         return result
 
-    async def _trip_or_none(self, trip_id: str | None) -> Trip | None:
+    async def _trip_or_none(self, trip_id: str | None, trip: Trip | None) -> Trip | None:
+        """Use the caller's in-memory trip (bulk mode) or load it. Bulk callers keep one Trip in sync."""
+        if trip is not None:
+            return trip
         return await self.load_trip(trip_id) if trip_id else None
 
     async def upsert_location(self, *, trip_id: str | None, location_id: str | None, name: str | None,
@@ -261,20 +292,22 @@ class TripService:
                               latitude: float | None, longitude: float | None, address: str | None,
                               link: str | None, price: float | None, price_currency: str | None,
                               visit_start: str | None, visit_end: str | None, timezone: str | None,
-                              date: str | None, trip_wide: bool) -> dict[str, Any]:
+                              date: str | None, trip_wide: bool, trip: Trip | None = None,
+                              auto_schedule: bool = True) -> dict[str, Any]:
         if not location_id and not name:
             raise PlanError("name is required when creating a location.")
-        trip = await self._trip_or_none(trip_id)
+        trip = await self._trip_or_none(trip_id, trip)
         tz = timezone or (trip.timezone if trip else "UTC")
         payload = _set({}, name=name, description=description, location=address, link=link,
                        latitude=_coord(latitude), longitude=_coord(longitude),
                        price=price, price_currency=price_currency)
         if category:
-            payload["category"] = {"name": category.strip().lower(), "display_name": category.strip(),
-                                   "icon": category_icon or "📍"}
+            payload["category"] = await self.category_payload(category, category_icon)
         existing = None
         if location_id:
-            existing = await self.api.get(f"{ENDPOINTS['location']}{_id(location_id, 'location_id')}/")
+            location_id = _id(location_id, "location_id")
+            existing = (trip and trip.object("location", location_id)) or await self.api.get(
+                f"{ENDPOINTS['location']}{location_id}/")
             if trip_id and trip_id not in [str(c) for c in existing.get("collections") or []]:
                 payload["collections"] = [*map(str, existing.get("collections") or []), trip_id]
         else:
@@ -287,9 +320,15 @@ class TripService:
             visit_date = local_date(to_utc_iso(visit_start, tz), tz)
             date = date or visit_date
             old = existing or obj
+            # Replace the visit on the new day, and on the day the location is being moved away from.
+            replaced = {visit_date}
+            if trip is not None and location_id:
+                dated = [it for it in trip.itinerary_for(location_id) if not it.get("is_global")]
+                if len(dated) == 1:
+                    replaced.add(dated[0].get("date"))
             visits = [
                 _visit_payload(v) for v in old.get("visits") or []
-                if local_date(v.get("start_date"), v.get("timezone") or tz) != visit_date
+                if local_date(v.get("start_date"), v.get("timezone") or tz) not in replaced
             ]
             visits.append({
                 "start_date": to_utc_iso(visit_start, tz),
@@ -297,17 +336,18 @@ class TripService:
                 "timezone": tz,
             })
             obj = await self.api.patch(f"{ENDPOINTS['location']}{_id(obj['id'])}/", {"visits": visits})
-        return await self._finish(trip_id, "location", obj, created, date, trip_wide, trip)
+        return await self._finish(trip, "location", obj, created, date, trip_wide, auto_schedule)
 
     async def upsert_lodging(self, *, trip_id: str | None, lodging_id: str | None, name: str | None,
                              lodging_type: str | None, check_in: str | None, check_out: str | None,
                              timezone: str | None, address: str | None, latitude: float | None,
                              longitude: float | None, reservation_number: str | None, price: float | None,
                              price_currency: str | None, link: str | None, description: str | None,
-                             date: str | None, trip_wide: bool) -> dict[str, Any]:
+                             date: str | None, trip_wide: bool, trip: Trip | None = None,
+                              auto_schedule: bool = True) -> dict[str, Any]:
         if not lodging_id and not name:
             raise PlanError("name is required when creating lodging.")
-        trip = await self._trip_or_none(trip_id)
+        trip = await self._trip_or_none(trip_id, trip)
         tz = timezone or (trip.timezone if trip else "UTC")
         payload = _set({}, name=name, type=lodging_type, location=address, reservation_number=reservation_number,
                        latitude=_coord(latitude), longitude=_coord(longitude), price=price,
@@ -321,7 +361,7 @@ class TripService:
         obj, created = await self._save("lodging", lodging_id, payload)
         if trip_id and not date and not trip_wide and obj.get("check_in"):
             date = local_date(obj["check_in"], obj.get("timezone") or tz)
-        return await self._finish(trip_id, "lodging", obj, created, date, trip_wide, trip)
+        return await self._finish(trip, "lodging", obj, created, date, trip_wide, auto_schedule)
 
     async def upsert_transportation(self, *, trip_id: str | None, transportation_id: str | None,
                                     name: str | None, transport_type: str | None, depart: str | None,
@@ -331,10 +371,11 @@ class TripService:
                                     origin_latitude: float | None, origin_longitude: float | None,
                                     destination_latitude: float | None, destination_longitude: float | None,
                                     price: float | None, price_currency: str | None, link: str | None,
-                                    description: str | None, date: str | None, trip_wide: bool) -> dict[str, Any]:
+                                    description: str | None, date: str | None, trip_wide: bool,
+                                    trip: Trip | None = None, auto_schedule: bool = True) -> dict[str, Any]:
         if not transportation_id and not (name and transport_type):
             raise PlanError("name and transport_type are required when creating transportation.")
-        trip = await self._trip_or_none(trip_id)
+        trip = await self._trip_or_none(trip_id, trip)
         stz = start_timezone or (trip.timezone if trip else "UTC")
         etz = end_timezone or stz
         payload = _set({}, name=name, type=transport_type, from_location=from_location, to_location=to_location,
@@ -351,27 +392,29 @@ class TripService:
         obj, created = await self._save("transportation", transportation_id, payload)
         if trip_id and not date and not trip_wide and obj.get("date"):
             date = local_date(obj["date"], obj.get("start_timezone") or stz)
-        return await self._finish(trip_id, "transportation", obj, created, date, trip_wide, trip)
+        return await self._finish(trip, "transportation", obj, created, date, trip_wide, auto_schedule)
 
     async def upsert_note(self, *, trip_id: str | None, note_id: str | None, name: str | None,
                           content: str | None, links: list[str] | None, date: str | None,
-                          trip_wide: bool) -> dict[str, Any]:
+                          trip_wide: bool, trip: Trip | None = None,
+                              auto_schedule: bool = True) -> dict[str, Any]:
         if not note_id and not name:
             raise PlanError("name is required when creating a note.")
-        trip = await self._trip_or_none(trip_id)
+        trip = await self._trip_or_none(trip_id, trip)
         payload = _set({}, name=name, content=content, links=links, collection=trip_id,
                        date=date and check_date(date))
         if not note_id:
             payload["is_public"] = bool(trip and trip.is_public)
         obj, created = await self._save("note", note_id, payload)
-        return await self._finish(trip_id, "note", obj, created, date, trip_wide, trip)
+        return await self._finish(trip, "note", obj, created, date, trip_wide, auto_schedule)
 
     async def upsert_checklist(self, *, trip_id: str | None, checklist_id: str | None, name: str | None,
                                items: list[dict[str, Any]] | None, date: str | None,
-                               trip_wide: bool) -> dict[str, Any]:
+                               trip_wide: bool, trip: Trip | None = None,
+                              auto_schedule: bool = True) -> dict[str, Any]:
         if not checklist_id and not name:
             raise PlanError("name is required when creating a checklist.")
-        trip = await self._trip_or_none(trip_id)
+        trip = await self._trip_or_none(trip_id, trip)
         payload = _set({}, name=name, collection=trip_id, date=date and check_date(date))
         if items is not None:
             payload["items"] = [
@@ -382,7 +425,7 @@ class TripService:
             payload.setdefault("items", [])
             payload["is_public"] = bool(trip and trip.is_public)
         obj, created = await self._save("checklist", checklist_id, payload)
-        return await self._finish(trip_id, "checklist", obj, created, date, trip_wide, trip)
+        return await self._finish(trip, "checklist", obj, created, date, trip_wide, auto_schedule)
 
     # ------------------------------------------------------------------ sharing
 
@@ -459,6 +502,10 @@ def _visit_payload(v: dict[str, Any]) -> dict[str, Any]:
     # No "location" key: LocationSerializer.update() adds it itself and a duplicate 500s.
     return _set({"start_date": v.get("start_date"), "end_date": v.get("end_date")},
                 timezone=v.get("timezone"), notes=v.get("notes"))
+
+
+def _where(itin: dict[str, Any]) -> str:
+    return "trip_wide" if itin.get("is_global") else str(itin.get("date"))
 
 
 def _entry(itin: dict[str, Any]) -> dict[str, Any]:
