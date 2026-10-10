@@ -6,6 +6,8 @@ Kept free of MCP types so it can be unit-tested and reused (e.g. by the bulk
 
 from __future__ import annotations
 
+import re
+import uuid
 from datetime import date as Date
 from datetime import timedelta
 from typing import Any
@@ -39,7 +41,7 @@ class TripService:
     # ------------------------------------------------------------------ reads
 
     async def load_trip(self, trip_id: str) -> Trip:
-        return Trip(await self.api.get(f"/api/collections/{trip_id}/"))
+        return Trip(await self.api.get(f"/api/collections/{_id(trip_id, 'trip_id')}/"))
 
     async def list_trips(self, include_shared: bool = True, include_archived: bool = False) -> list[dict[str, Any]]:
         owned = await self.api.get_all("/api/collections/")
@@ -63,7 +65,7 @@ class TripService:
         return sorted(out, key=lambda t: t.get("start_date") or "9999")
 
     async def get_item(self, item_type: str, item_id: str) -> dict[str, Any]:
-        obj = await self.api.get(f"{ENDPOINTS[_check_type(item_type)]}{item_id}/")
+        obj = await self.api.get(f"{ENDPOINTS[_check_type(item_type)]}{_id(item_id, 'item_id')}/")
         for noisy in ("images", "attachments", "trails", "user"):
             obj.pop(noisy, None)
         for geo in ("city", "region", "country"):
@@ -100,14 +102,14 @@ class TripService:
         payload = _set({}, **fields)
         if not payload:
             raise PlanError("Nothing to update.")
-        await self.api.patch(f"/api/collections/{trip_id}/", payload)
+        await self.api.patch(f"/api/collections/{_id(trip_id, 'trip_id')}/", payload)
         return await self.load_trip(trip_id)
 
     async def delete_trip(self, trip_id: str, confirm_name: str) -> dict[str, Any]:
         trip = await self.load_trip(trip_id)
         if confirm_name.strip() != trip.name.strip():
             raise PlanError(f"confirm_name does not match the trip name {trip.name!r}; nothing deleted.")
-        await self.api.delete(f"/api/collections/{trip_id}/")
+        await self.api.delete(f"/api/collections/{_id(trip.id)}/")
         return {"deleted": True, "id": trip_id, "name": trip.name}
 
     async def upsert_day(self, trip_id: str, date: str, name: str | None, description: str | None) -> dict[str, Any]:
@@ -116,7 +118,7 @@ class TripService:
         existing = trip.day_meta(date)
         payload = _set({}, name=name, description=description)
         if existing:
-            day = await self.api.patch(f"/api/itinerary-days/{existing['id']}/", payload)
+            day = await self.api.patch(f"/api/itinerary-days/{_id(existing['id'])}/", payload)
         else:
             day = await self.api.post("/api/itinerary-days/", {"collection": trip_id, "date": date, **payload})
         return {"day_id": day["id"], "date": day["date"], "name": day.get("name"), "description": day.get("description")}
@@ -129,6 +131,7 @@ class TripService:
         entry rather than duplicating it; adds a new entry if it is already on several days."""
         if trip_wide and date:
             raise PlanError("Give either date or trip_wide, not both.")
+        object_id = _id(object_id, "item_id")
         existing = trip.itinerary_for(object_id)
         if trip_wide:
             hit = next((it for it in existing if it.get("is_global")), None)
@@ -173,6 +176,7 @@ class TripService:
                         position: int | None, shift_times: bool) -> dict[str, Any]:
         if trip_wide == bool(date):
             raise PlanError("Give exactly one of date or trip_wide.")
+        itinerary_id = _id(itinerary_id, "itinerary_id")
         itin = await self.api.get(f"/api/itineraries/{itinerary_id}/")
         trip = await self.load_trip(str(itin["collection"]))
         itin = trip.itinerary_item(itinerary_id) or itin
@@ -189,7 +193,7 @@ class TripService:
         obj = trip.object(item_type, object_id)
         if obj is None:
             return
-        path = f"{ENDPOINTS[item_type]}{object_id}/"
+        path = f"{ENDPOINTS[item_type]}{_id(object_id)}/"
         if item_type == "transportation":
             await self.api.patch(path, _set({}, date=_shift_utc(obj.get("date"), days),
                                             end_date=_shift_utc(obj.get("end_date"), days)))
@@ -226,19 +230,19 @@ class TripService:
         return [_entry(u) for u in sorted(updated, key=lambda u: u["order"])]
 
     async def unschedule(self, itinerary_id: str, keep_visit: bool) -> dict[str, Any]:
-        await self.api.delete(f"/api/itineraries/{itinerary_id}/",
+        await self.api.delete(f"/api/itineraries/{_id(itinerary_id, 'itinerary_id')}/",
                               preserve_visits="true" if keep_visit else "false")
         return {"unscheduled": True, "itinerary_id": itinerary_id}
 
     # ------------------------------------------------------------------ elements
 
     async def delete_item(self, item_type: str, item_id: str) -> dict[str, Any]:
-        await self.api.delete(f"{ENDPOINTS[_check_type(item_type)]}{item_id}/")
+        await self.api.delete(f"{ENDPOINTS[_check_type(item_type)]}{_id(item_id, 'item_id')}/")
         return {"deleted": True, "type": item_type, "id": item_id}
 
     async def _save(self, item_type: str, item_id: str | None, payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         if item_id:
-            return await self.api.patch(f"{ENDPOINTS[item_type]}{item_id}/", payload), False
+            return await self.api.patch(f"{ENDPOINTS[item_type]}{_id(item_id)}/", payload), False
         return await self.api.post(ENDPOINTS[item_type], payload), True
 
     async def _finish(self, trip_id: str | None, item_type: str, obj: dict[str, Any], created: bool,
@@ -270,7 +274,7 @@ class TripService:
                                    "icon": category_icon or "📍"}
         existing = None
         if location_id:
-            existing = await self.api.get(f"{ENDPOINTS['location']}{location_id}/")
+            existing = await self.api.get(f"{ENDPOINTS['location']}{_id(location_id, 'location_id')}/")
             if trip_id and trip_id not in [str(c) for c in existing.get("collections") or []]:
                 payload["collections"] = [*map(str, existing.get("collections") or []), trip_id]
         else:
@@ -292,7 +296,7 @@ class TripService:
                 "end_date": to_utc_iso(visit_end or visit_start, tz),
                 "timezone": tz,
             })
-            obj = await self.api.patch(f"{ENDPOINTS['location']}{obj['id']}/", {"visits": visits})
+            obj = await self.api.patch(f"{ENDPOINTS['location']}{_id(obj['id'])}/", {"visits": visits})
         return await self._finish(trip_id, "location", obj, created, date, trip_wide, trip)
 
     async def upsert_lodging(self, *, trip_id: str | None, lodging_id: str | None, name: str | None,
@@ -385,6 +389,8 @@ class TripService:
     async def share_trip(self, trip_id: str, username: str) -> dict[str, Any]:
         """Send a collaboration invite. AdventureLog only lets you invite users with a public profile."""
         try:
+            if not _USERNAME.match(username or ""):
+                raise PlanError(f"Invalid username {username!r}.")
             user = await self.api.get(f"/auth/user/{username}/")
         except ApiError as exc:
             if exc.status == 404:
@@ -393,7 +399,7 @@ class TripService:
                     "profile is public (Settings -> public profile)."
                 ) from exc
             raise
-        resp = await self.api.post(f"/api/collections/{trip_id}/share/{user['uuid']}/", {})
+        resp = await self.api.post(f"/api/collections/{_id(trip_id, 'trip_id')}/share/{_id(user['uuid'])}/", {})
         return {"invited": True, "trip_id": trip_id, "username": username,
                 "note": (resp or {}).get("success", "Invite sent; they must accept it in AdventureLog.")}
 
@@ -403,7 +409,7 @@ class TripService:
                       if c.get("username") == username and not c.get("is_owner")), None)
         if not match:
             raise PlanError(f"{username!r} is not a collaborator on this trip.")
-        await self.api.post(f"/api/collections/{trip_id}/unshare/{match['uuid']}/", {})
+        await self.api.post(f"/api/collections/{trip.id}/unshare/{_id(match['uuid'])}/", {})
         return {"unshared": True, "trip_id": trip_id, "username": username}
 
     async def search(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
@@ -412,6 +418,17 @@ class TripService:
             {"type": r.get("type"), "id": r.get("id"), "name": r.get("title"), "detail": r.get("subtitle")}
             for r in (resp or {}).get("results", [])
         ]
+
+
+def _id(value: Any, what: str = "id") -> str:
+    """Canonical UUID string. Ids end up in URL paths, so anything else is refused outright."""
+    try:
+        return str(uuid.UUID(str(value).strip()))
+    except (ValueError, AttributeError) as exc:
+        raise PlanError(f"{what} must be a UUID like the ids returned by get_trip, got {value!r}") from exc
+
+
+_USERNAME = re.compile(r"^[\w.@+-]{1,150}$")
 
 
 def _check_type(item_type: str) -> str:

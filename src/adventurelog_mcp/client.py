@@ -8,6 +8,7 @@ access logic of its own.
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -34,6 +35,15 @@ def _flatten(body: Any) -> str:
     if isinstance(body, list):
         return "; ".join(_flatten(v) for v in body)
     return str(body)
+
+
+def _check_path(path: str) -> None:
+    """Defence in depth against path injection: only plain API paths on our own server."""
+    route = path.split("?", 1)[0]
+    lowered = route.lower()
+    if (not route.startswith("/") or "//" in route or "\\" in route or "%2e" in lowered or "%2f" in lowered
+            or any(seg in (".", "..") for seg in route.split("/"))):
+        raise ValueError(f"Refusing suspicious API path: {path!r}")
 
 
 class AdventureLogClient:
@@ -69,6 +79,7 @@ class AdventureLogClient:
         params: dict[str, Any] | None = None,
         json: Any = None,
     ) -> Any:
+        _check_path(path)
         resp = await self._http.request(method, path, params=params, json=json)
         if resp.is_error:
             try:
@@ -90,7 +101,9 @@ class AdventureLogClient:
             return page
         results = list(page.get("results", []))
         while page.get("next"):
-            page = await self.request("GET", page["next"])
+            # DRF builds `next` from the request Host, which may differ behind a proxy: keep path + query only.
+            nxt = urlsplit(page["next"])
+            page = await self.request("GET", nxt.path + (f"?{nxt.query}" if nxt.query else ""))
             results.extend(page.get("results", []))
         return results
 

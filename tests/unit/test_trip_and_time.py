@@ -27,28 +27,28 @@ def test_bad_timezone_is_a_value_error():
 
 
 def _raw_trip() -> dict:
-    cid = "c1"
+    cid = "00000000-0000-4000-8000-0000000000c1"
     return {
         "id": cid, "name": "Test", "start_date": "2026-12-14", "end_date": "2026-12-16", "is_public": False,
         "status": "upcoming", "collaborators": [{"username": "jon", "is_owner": True}],
-        "itinerary_days": [{"id": "d1", "date": "2026-12-14", "name": "Arrive", "description": None}],
+        "itinerary_days": [{"id": "00000000-0000-4000-8000-00000000f001", "date": "2026-12-14", "name": "Arrive", "description": None}],
         "itinerary": [
-            {"id": "i2", "object_id": "loc1", "item": {"type": "location"}, "date": "2026-12-14", "is_global": False,
+            {"id": "00000000-0000-4000-8000-00000000e002", "object_id": "00000000-0000-4000-8000-00000000a001", "item": {"type": "location"}, "date": "2026-12-14", "is_global": False,
              "order": 2},
-            {"id": "i1", "object_id": "lod1", "item": {"type": "lodging"}, "date": "2026-12-14", "is_global": False,
+            {"id": "00000000-0000-4000-8000-00000000e001", "object_id": "00000000-0000-4000-8000-00000000b001", "item": {"type": "lodging"}, "date": "2026-12-14", "is_global": False,
              "order": 1},
-            {"id": "i3", "object_id": "n1", "item": {"type": "note"}, "date": None, "is_global": True, "order": 0},
+            {"id": "00000000-0000-4000-8000-00000000e003", "object_id": "00000000-0000-4000-8000-00000000d001", "item": {"type": "note"}, "date": None, "is_global": True, "order": 0},
         ],
         "locations": [
-            {"id": "loc1", "name": "Gardens", "category": {"name": "sightseeing", "display_name": "Sightseeing"},
+            {"id": "00000000-0000-4000-8000-00000000a001", "name": "Gardens", "category": {"name": "sightseeing", "display_name": "Sightseeing"},
              "latitude": -43.5, "longitude": 172.6, "description": "x" * 500,
              "visits": [{"start_date": "2026-12-14T03:00:00Z", "end_date": "2026-12-14T04:30:00Z", "timezone": NZ}]},
-            {"id": "loc2", "name": "Unplanned", "visits": []},
+            {"id": "00000000-0000-4000-8000-00000000a002", "name": "Unplanned", "visits": []},
         ],
-        "lodging": [{"id": "lod1", "name": "Hotel", "timezone": NZ, "check_in": "2026-12-14T01:00:00Z",
+        "lodging": [{"id": "00000000-0000-4000-8000-00000000b001", "name": "Hotel", "timezone": NZ, "check_in": "2026-12-14T01:00:00Z",
                      "check_out": "2026-12-15T22:00:00Z", "type": "hotel", "price": None}],
         "transportations": [],
-        "notes": [{"id": "n1", "name": "Packing", "content": "boots", "links": []}],
+        "notes": [{"id": "00000000-0000-4000-8000-00000000d001", "name": "Packing", "content": "boots", "links": []}],
         "checklists": [],
     }
 
@@ -101,20 +101,54 @@ async def test_api_errors_are_flattened():
 async def test_schedule_moves_single_existing_entry_instead_of_duplicating():
     route = respx.post("http://al/api/itineraries/reorder/").mock(
         return_value=httpx.Response(200, json=[
-            {"id": "i2", "date": "2026-12-15", "is_global": False, "order": 0}]))
+            {"id": "00000000-0000-4000-8000-00000000e002", "date": "2026-12-15", "is_global": False, "order": 0}]))
     create = respx.post("http://al/api/itineraries/").mock(return_value=httpx.Response(201, json={}))
     svc = TripService(AdventureLogClient("http://al", "al_x"))
-    result = await svc.schedule(Trip(_raw_trip()), "location", "loc1", "2026-12-15", False)
-    assert result == {"itinerary_id": "i2", "date": "2026-12-15", "trip_wide": False, "order": 0}
+    result = await svc.schedule(Trip(_raw_trip()), "location", "00000000-0000-4000-8000-00000000a001", "2026-12-15", False)
+    assert result == {"itinerary_id": "00000000-0000-4000-8000-00000000e002", "date": "2026-12-15", "trip_wide": False, "order": 0}
     assert route.called and not create.called
 
 
 @respx.mock
 async def test_delete_trip_requires_matching_name():
-    respx.get("http://al/api/collections/c1/").mock(return_value=httpx.Response(200, json=_raw_trip()))
-    delete = respx.delete("http://al/api/collections/c1/").mock(return_value=httpx.Response(204))
+    respx.get("http://al/api/collections/00000000-0000-4000-8000-0000000000c1/").mock(return_value=httpx.Response(200, json=_raw_trip()))
+    delete = respx.delete("http://al/api/collections/00000000-0000-4000-8000-0000000000c1/").mock(return_value=httpx.Response(204))
     svc = TripService(AdventureLogClient("http://al", "al_x"))
     with pytest.raises(PlanError):
-        await svc.delete_trip("c1", "Wrong")
+        await svc.delete_trip("00000000-0000-4000-8000-0000000000c1", "Wrong")
     assert not delete.called
-    assert (await svc.delete_trip("c1", "Test"))["deleted"]
+    assert (await svc.delete_trip("00000000-0000-4000-8000-0000000000c1", "Test"))["deleted"]
+
+
+@pytest.mark.parametrize("bad", ["../../auth/user/x", "1092767c-cb12-4b83-bf74-779fbc8c8350/../../x", "", "abc",
+                                 "%2e%2e"])
+async def test_ids_must_be_uuids(bad):
+    svc = TripService(AdventureLogClient("http://al", "al_x"))
+    with pytest.raises(PlanError, match="UUID"):
+        await svc.get_item("note", bad)
+    with pytest.raises(PlanError, match="UUID"):
+        await svc.delete_item("location", bad)
+    with pytest.raises(PlanError, match="UUID"):
+        await svc.load_trip(bad)
+
+
+@pytest.mark.parametrize("path", ["/api/../auth/", "/api/%2E%2E/x", "api/x", "/api//x", "/api/x\\..\\y"])
+async def test_client_refuses_suspicious_paths(path):
+    with pytest.raises(ValueError, match="suspicious"):
+        await AdventureLogClient("http://al", "al_x").get(path)
+
+
+async def test_username_is_validated():
+    svc = TripService(AdventureLogClient("http://al", "al_x"))
+    with pytest.raises(PlanError, match="Invalid username"):
+        await svc.share_trip("1092767c-cb12-4b83-bf74-779fbc8c8350", "../admin")
+
+
+@respx.mock
+async def test_pagination_ignores_next_host():
+    respx.get("http://al/api/collections/", params={"page": "2"}).mock(
+        return_value=httpx.Response(200, json={"results": [{"id": 2}], "next": None}))
+    respx.get("http://al/api/collections/").mock(
+        return_value=httpx.Response(200, json={"results": [{"id": 1}],
+                                               "next": "https://evil.example/api/collections/?page=2"}))
+    assert await AdventureLogClient("http://al", "al_x").get_all("/api/collections/") == [{"id": 1}, {"id": 2}]
