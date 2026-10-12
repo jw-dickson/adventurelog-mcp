@@ -16,8 +16,9 @@ import httpx
 class ApiError(Exception):
     """An HTTP error from AdventureLog, with the response body flattened to text."""
 
-    def __init__(self, status: int, method: str, path: str, detail: str):
+    def __init__(self, status: int, method: str, path: str, detail: str, body: Any = None):
         self.status = status
+        self.body = body
         self.method = method
         self.path = path
         self.detail = detail
@@ -78,15 +79,18 @@ class AdventureLogClient:
         *,
         params: dict[str, Any] | None = None,
         json: Any = None,
+        data: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
     ) -> Any:
         _check_path(path)
-        resp = await self._http.request(method, path, params=params, json=json)
+        resp = await self._http.request(method, path, params=params, json=json, data=data, files=files)
         if resp.is_error:
             try:
-                detail = _flatten(resp.json())
+                body = resp.json()
+                detail = _flatten(body)
             except ValueError:
-                detail = resp.text[:500] or resp.reason_phrase
-            raise ApiError(resp.status_code, method, path, detail)
+                body, detail = None, resp.text[:500] or resp.reason_phrase
+            raise ApiError(resp.status_code, method, path, detail, body)
         if resp.status_code == 204 or not resp.content:
             return None
         return resp.json()
@@ -112,6 +116,10 @@ class AdventureLogClient:
 
     async def patch(self, path: str, data: Any) -> Any:
         return await self.request("PATCH", path, json=data)
+
+    async def upload(self, path: str, data: dict[str, Any], files: dict[str, Any]) -> Any:
+        """Multipart POST (file uploads)."""
+        return await self.request("POST", path, data=data, files=files)
 
     async def delete(self, path: str, **params: Any) -> None:
         await self.request("DELETE", path, params=params or None)

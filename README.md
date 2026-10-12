@@ -22,6 +22,7 @@ all directly in your AdventureLog.
 | Trips & days | `create_trip`, `update_trip`, `delete_trip` (requires the exact trip name), `upsert_day` |
 | Items | `upsert_location`, `upsert_lodging`, `upsert_transportation`, `upsert_note`, `upsert_checklist`, `delete_item` |
 | Itinerary | `schedule_item`, `move_item`, `reorder_day`, `unschedule_item` |
+| Photos | `add_photos` (image URLs, or local files in stdio mode; up to 10 per call), `remove_photo`, `set_primary_photo`, `set_trip_cover` |
 | Sharing | `share_trip` (sends an invite), `unshare_trip` |
 | Bulk | `export_trip_plan` (trip → editable plan), `apply_trip_plan` (plan → trip: dry-run diff by default, `expected_diff_hash` guard, idempotent) |
 | Prompt | `plan-trip`: read, propose, dry-run, confirm, apply |
@@ -117,6 +118,8 @@ claude mcp add --transport http adventurelog https://adventurelog-mcp.example.co
 - In HTTP mode the server never uses a server-side key unless you explicitly opt in. Without that, anyone who
   could reach `/mcp` would act as that user.
 - Destructive tools carry MCP `destructiveHint` annotations, so clients can ask for confirmation.
+- `add_photos` URLs are downloaded by AdventureLog itself, which refuses private, loopback and reserved
+  addresses. `file_paths` is refused in HTTP mode, where the paths would be on the server.
 
 ## Known upstream quirks
 
@@ -124,6 +127,8 @@ claude mcp add --transport http adventurelog https://adventurelog-mcp.example.co
   of a large trip takes 1–3 s.
 - Editing a checklist recreates its items, so item ids change after `upsert_checklist`.
 - Invites only work for users with a public profile.
+- Photos attach to locations, lodging and transportation only. A trip's cover must be a photo of one of its
+  locations that you own.
 
 ## Development
 

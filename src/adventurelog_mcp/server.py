@@ -7,6 +7,7 @@ import hashlib
 import logging
 import os
 from collections.abc import Awaitable
+from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar
 
 from mcp.server.mcpserver import Context, MCPServer
@@ -38,6 +39,9 @@ Workflow:
    local start date automatically.
 4. Rearrange with move_item / reorder_day. Take items off a day with unschedule_item, and
    delete them for good with delete_item.
+5. Photos: add_photos attaches real image URLs (or local files) to a location, lodging or
+   transportation; get_item lists an item's photos with their ids. remove_photo,
+   set_primary_photo and set_trip_cover take those ids.
 
 Times are local wall-clock times ('2026-12-15T10:30') in the given IANA timezone. If you leave
 the timezone out, the trip's timezone from get_trip is used. Re-read the trip with get_trip after
@@ -52,6 +56,10 @@ DESTRUCTIVE = ToolAnnotations(read_only_hint=False, destructive_hint=True, idemp
                               open_world_hint=False)
 
 ItemType = Literal["location", "lodging", "transportation", "note", "checklist"]
+PhotoItemType = Literal["location", "lodging", "transportation"]
+
+PHOTO_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+MAX_PHOTO_BYTES = 25 * 1024 * 1024
 
 TripId = Annotated[str, Field(description="Trip (collection) UUID from list_trips.")]
 OptTripId = Annotated[str | None, Field(description="Trip UUID. Required to put the item on the itinerary.")]
@@ -430,6 +438,51 @@ def build_server(settings: Settings | None = None, *, transport: Any = None) -> 
                                     allow_deletes=allow_deletes, expected_diff_hash=expected_diff_hash,
                                     progress=progress))
 
+    # ------------------------------------------------------------------ photos
+
+    @mcp.tool(annotations=WRITE)
+    async def add_photos(
+        ctx: Context,
+        item_type: PhotoItemType,
+        item_id: str,
+        urls: Annotated[list[str] | None, Field(
+            description="Public image URLs (e.g. Wikimedia Commons, the venue's site). AdventureLog downloads them.")
+        ] = None,
+        file_paths: Annotated[list[str] | None, Field(
+            description="Local image files to upload. Only when this server runs locally (stdio).")] = None,
+        make_primary: Annotated[bool, Field(
+            description="Make the first added photo the item's primary photo. An item's first photo is "
+                        "primary anyway.")] = False,
+    ) -> dict:
+        """Add up to 10 photos to a location, lodging or transportation. Use real photos of the actual place; never
+        invent URLs. Returns the new photo ids (for remove_photo / set_primary_photo / set_trip_cover) and any
+        URLs that could not be fetched."""
+        svc = service(ctx)
+
+        async def go() -> dict:
+            return await svc.add_photos(item_type, item_id, urls, _read_photos(file_paths, settings), make_primary)
+
+        return await run(go())
+
+    @mcp.tool(annotations=DESTRUCTIVE)
+    async def remove_photo(ctx: Context, photo_id: Annotated[str, Field(
+            description="Photo id from get_item's `photos` or add_photos")]) -> dict:
+        """Permanently delete one photo from its item."""
+        return await run(service(ctx).remove_photo(photo_id))
+
+    @mcp.tool(annotations=IDEMPOTENT_WRITE)
+    async def set_primary_photo(ctx: Context, photo_id: str) -> dict:
+        """Make a photo the primary (thumbnail) photo of its item."""
+        return await run(service(ctx).set_primary_photo(photo_id))
+
+    @mcp.tool(annotations=IDEMPOTENT_WRITE)
+    async def set_trip_cover(ctx: Context, trip_id: TripId,
+                             photo_id: Annotated[str | None, Field(
+                                 description="A photo of one of this trip's locations (that you own); "
+                                             "omit to clear the cover.")] = None) -> dict:
+        """Set or clear the trip's cover photo."""
+        return await run(service(ctx).set_trip_cover(trip_id, photo_id))
+
     # ------------------------------------------------------------------ sharing
 
     @mcp.tool(annotations=WRITE)
@@ -443,6 +496,25 @@ def build_server(settings: Settings | None = None, *, transport: Any = None) -> 
         return await run(service(ctx).unshare_trip(trip_id, username))
 
     return mcp
+
+
+def _read_photos(paths: list[str] | None, settings: Settings) -> list[tuple[str, bytes]]:
+    """Read local photo files for upload. Refused over HTTP: there the paths would be on the server, not the user's."""
+    if not paths:
+        return []
+    if settings.http:
+        raise ToolError("file_paths only works when the server runs locally (stdio); give photo URLs instead.")
+    out = []
+    for raw in paths:
+        path = Path(raw).expanduser()
+        if path.suffix.lower() not in PHOTO_SUFFIXES:
+            raise ToolError(f"{raw!r} is not a photo ({', '.join(PHOTO_SUFFIXES)}).")
+        if not path.is_file():
+            raise ToolError(f"No such file: {raw!r}")
+        if path.stat().st_size > MAX_PHOTO_BYTES:
+            raise ToolError(f"{raw!r} is larger than {MAX_PHOTO_BYTES // (1024 * 1024)} MB.")
+        out.append((path.name, path.read_bytes()))
+    return out
 
 
 async def _render(svc: TripService, trip_id: str, from_date: str | None = None, to_date: str | None = None) -> dict:

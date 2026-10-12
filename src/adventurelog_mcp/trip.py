@@ -45,6 +45,12 @@ def _drop_empty(d: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in d.items() if v not in (None, "", [], {})}
 
 
+def photo(img: dict[str, Any]) -> dict[str, Any]:
+    """Compact view of an AdventureLog image: its id (for remove/primary/cover), URL and origin."""
+    return {"id": str(img["id"]), "primary": bool(img.get("is_primary")),
+            **_drop_empty({"url": img.get("image"), "source": img.get("source"), "source_url": img.get("source_url")})}
+
+
 class Trip:
     def __init__(self, raw: dict[str, Any]):
         self.raw = raw
@@ -166,6 +172,7 @@ class Trip:
                     for i in obj.get("items") or []
                 ]
             )
+        base["photos"] = len([i for i in obj.get("images") or [] if i]) or None
         return _drop_empty(base)
 
     def render_itinerary_entry(self, itin: dict[str, Any]) -> dict[str, Any]:
@@ -194,6 +201,7 @@ class Trip:
                     for c in raw.get("collaborators") or []
                 ],
                 "updated_at": raw.get("updated_at"),
+                "cover_photo": photo(raw["primary_image"]) if raw.get("primary_image") else None,
             }
         )
 

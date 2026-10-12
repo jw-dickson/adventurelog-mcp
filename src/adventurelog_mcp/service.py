@@ -14,7 +14,7 @@ from typing import Any
 
 from .client import AdventureLogClient, ApiError
 from .timeutil import check_date, local_date, parse_utc, to_utc_iso
-from .trip import ENDPOINTS, ITEM_TYPES, Trip
+from .trip import ENDPOINTS, ITEM_TYPES, Trip, photo
 
 
 class PlanError(ValueError):
@@ -81,6 +81,8 @@ class TripService:
 
     async def get_item(self, item_type: str, item_id: str) -> dict[str, Any]:
         obj = await self.api.get(f"{ENDPOINTS[_check_type(item_type)]}{_id(item_id, 'item_id')}/")
+        if obj.get("images"):
+            obj["photos"] = [photo(i) for i in obj["images"] if i]
         for noisy in ("images", "attachments", "trails", "user"):
             obj.pop(noisy, None)
         for geo in ("city", "region", "country"):
@@ -427,6 +429,68 @@ class TripService:
         obj, created = await self._save("checklist", checklist_id, payload)
         return await self._finish(trip, "checklist", obj, created, date, trip_wide, auto_schedule)
 
+    # ------------------------------------------------------------------ photos
+
+    async def add_photos(self, item_type: str, item_id: str, urls: list[str] | None,
+                         files: list[tuple[str, bytes]] | None, make_primary: bool) -> dict[str, Any]:
+        """Attach photos to a location, lodging or transportation: AdventureLog downloads `urls` itself,
+        and `files` (name, bytes) are uploaded. The item's first photo becomes its primary photo."""
+        if item_type not in PHOTO_TYPES:
+            raise PlanError(f"Photos can be added to {', '.join(PHOTO_TYPES)} only.")
+        item_id = _id(item_id, "item_id")
+        urls = [u.strip() for u in urls or [] if u and u.strip()]
+        files = files or []
+        if not urls and not files:
+            raise PlanError("Give at least one photo URL (or file).")
+        if len(urls) + len(files) > MAX_PHOTOS_PER_CALL:
+            raise PlanError(f"At most {MAX_PHOTOS_PER_CALL} photos per call.")
+        for u in urls:
+            if not u.lower().startswith(("https://", "http://")):
+                raise PlanError(f"Photo URLs must be http(s): {u!r}")
+
+        added: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        if urls:
+            try:
+                resp = await self.api.post("/api/images/import_from_urls/",
+                                           {"content_type": item_type, "object_id": item_id, "urls": urls})
+            except ApiError as exc:
+                if exc.status != 400 or not isinstance(exc.body, dict) or "results" not in exc.body:
+                    raise
+                resp = exc.body  # nothing could be imported; the per-URL reasons are in the body
+            added += [photo(i) for i in resp.get("created") or [] if i]
+            failed += [{"url": r.get("url"), "error": r.get("error") or "failed"}
+                       for r in resp.get("results") or [] if r.get("status") != "created"]
+        for name, content in files:
+            created = await self.api.upload("/api/images/", {"content_type": item_type, "object_id": item_id},
+                                            {"image": (name, content)})
+            added.append(photo(created))
+
+        if make_primary and added and not added[0]["primary"]:
+            await self.set_primary_photo(added[0]["id"])
+            added[0]["primary"] = True
+        return {"item_type": item_type, "item_id": item_id, "added": added, "failed": failed}
+
+    async def remove_photo(self, photo_id: str) -> dict[str, Any]:
+        await self.api.delete(f"/api/images/{_id(photo_id, 'photo_id')}/")
+        return {"removed": True, "photo_id": photo_id}
+
+    async def set_primary_photo(self, photo_id: str) -> dict[str, Any]:
+        """Make a photo its item's primary (thumbnail) photo. Already primary is fine."""
+        try:
+            await self.api.post(f"/api/images/{_id(photo_id, 'photo_id')}/toggle_primary/", {})
+        except ApiError as exc:
+            if not (exc.status == 400 and "already the primary" in exc.detail):
+                raise
+        return {"photo_id": photo_id, "primary": True}
+
+    async def set_trip_cover(self, trip_id: str, photo_id: str | None) -> dict[str, Any]:
+        """Choose the trip's cover photo (one of its locations' photos), or clear it with None."""
+        await self.api.patch(f"/api/collections/{_id(trip_id, 'trip_id')}/",
+                             {"primary_image_id": photo_id and _id(photo_id, "photo_id")})
+        trip = await self.load_trip(trip_id)
+        return {"trip_id": trip.id, "cover_photo": trip.summary().get("cover_photo")}
+
     # ------------------------------------------------------------------ sharing
 
     async def share_trip(self, trip_id: str, username: str) -> dict[str, Any]:
@@ -472,6 +536,10 @@ def _id(value: Any, what: str = "id") -> str:
 
 
 _USERNAME = re.compile(r"^[\w.@+-]{1,150}$")
+
+# AdventureLog accepts photos on these (notes and checklists have none); import_from_urls takes at most 10.
+PHOTO_TYPES = ("location", "lodging", "transportation")
+MAX_PHOTOS_PER_CALL = 10
 
 
 def _check_type(item_type: str) -> str:
